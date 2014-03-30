@@ -1,0 +1,338 @@
+#!/bin/sh
+#
+# Traffic logging tool for OpenWRT-based routers
+#
+# Munin-ified by JP Meijers on 2014-01-20
+# Adapted for OpenWRT's munin by ender on 2014-03-11
+# Created by Emmanuel Brucy (e.brucy AT qut.edu.au)
+# Based on work from Fredrik Erlandsson (erlis AT linux.nu)
+# Based on traff_graph script by twist - http://wiki.openwrt.org/RrdTrafficWatch
+# 
+#
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+
+LAN_IFACE=br-lan
+LAN_IFACE_MUNIN=$(echo $LAN_IFACE | sed -e 's/ //g' -e 's/\-/_/g') #munin friendly LAN_IFACE
+
+STORAGE_LOCATION="/root/trafficmon"
+USAGE_DB_LOCATION="${STORAGE_LOCATION}/usage.db"
+USERSFILE="${STORAGE_LOCATION}/known_macs.db"
+LASTUPDATE="${STORAGE_LOCATION}/lastupdate"
+
+[ ! -f $USAGE_DB_LOCATION ] && { touch $USAGE_DB_LOCATION ; }
+[ ! -f $USERSFILE ] && { touch $USERSFILE ; }
+[ ! -f $LASTUPDATE ] && { echo `date "+%d +%m +%Y"` > $LASTUPDATE ; }
+
+## create logic to delete the database if the last update was a previous month (a day for test)
+## keep list of macs, but reset counters
+
+while read DAY MONTH YEAR
+do
+  CURRENT_MONTH=`date "+%m"`
+  if [ $MONTH -ne $CURRENT_MONTH ]; then
+    while read MAC a b c d e
+    do
+      echo ${MAC},0,0,0,0,$(date "+%d-%m-%Y %H:%M") >> /tmp/tempusagedb
+    done < $USAGE_DB_LOCATION
+    mv /tmp/tempusagedb $USAGE_DB_LOCATION
+  fi
+done < $LASTUPDATE
+
+echo `date "+%d %m %Y"` > $LASTUPDATE
+
+lock()
+{
+	while [ -f /tmp/wrtbwmon.lock ]; do
+		if [ ! -d /proc/$(cat /tmp/wrtbwmon.lock) ]; then
+			rm -f /tmp/wrtbwmon.lock
+		fi
+		sleep 1
+	done
+	echo $$ > /tmp/wrtbwmon.lock
+}
+
+unlock()
+{
+	rm -f /tmp/wrtbwmon.lock
+}
+
+case $1 in
+   config)
+        #root graph usage
+        echo "multigraph ${LAN_IFACE_MUNIN}_usage"
+        echo "graph_title ${LAN_IFACE_MUNIN} data usage"
+        echo "graph_vlabel bytes up- and downloaded this month"
+        echo "graph_args --base 1000 --lower-limit 0"
+        echo "graph_category network"
+        echo "graph_info This graph shows the usage for ${LAN_IFACE_MUNIN}"
+        
+        echo "down.info bytes downloaded on ${LAN_IFACE_MUNIN}"
+        echo "down.label downloaded"
+        echo "down.draw AREA"
+        echo "down.type GAUGE"
+        echo "up.info bytes uploaded on ${LAN_IFACE_MUNIN}"
+        echo "up.label uploaded"
+        echo "up.draw STACK"
+        echo "up.type GAUGE"
+        echo "total.cdef up,down,+"
+        echo "total.label total"
+        echo "total.info total usage in bytes on ${LAN_IFACE_MUNIN}"
+
+        #sub root graph usage
+        echo "multigraph ${LAN_IFACE_MUNIN}_usage.usage"
+        echo "graph_title ${LAN_IFACE_MUNIN} data usage"
+        echo "graph_vlabel bytes up- and downloaded this month"
+        echo "graph_args --base 1000 --lower-limit 0"
+        echo "graph_category network"
+        echo "graph_info This graph shows the usage for ${LAN_IFACE_MUNIN}"
+        
+        echo "down.info bytes downloaded on ${LAN_IFACE_MUNIN}"
+        echo "down.label downloaded"
+        echo "down.draw AREA"
+        echo "down.type GAUGE"
+        echo "up.info bytes uploaded on ${LAN_IFACE_MUNIN}"
+        echo "up.label uploaded"
+        echo "up.draw STACK"
+        echo "up.type GAUGE"
+        echo "total.cdef up,down,+"
+        echo "total.label total"
+        echo "total.info total usage in bytes on ${LAN_IFACE_MUNIN}"
+
+        #sub graph usage
+        #for each mac we monitor
+        while IFS=, read MAC a b c d e
+        do
+          MAC=`echo $MAC | tr -d ':'` #strip colons from mac
+          echo "multigraph ${LAN_IFACE_MUNIN}_usage.$MAC"
+          
+          #graph real name stays constant, but change the labels if we know more
+          USER=$(grep "${MAC}" "${USERSFILE}" | cut -f2 -s -d, )
+                	[ -z "$USER" ] && USER=${MAC}
+          echo "graph_title $USER data usage"
+          echo "graph_vlabel bytes up- and downloaded this month"
+          echo "graph_args --base 1000 --lower-limit 0"
+          echo "graph_category network"
+          echo "graph_info This graph shows the usage of $USER"
+          
+          echo "down.info bytes downloaded by $USER"
+          echo "down.label downloaded"
+          echo "down.draw AREA"
+          echo "down.type GAUGE"
+          echo "up.info bytes uploaded by $USER"
+          echo "up.label uploaded"
+          echo "up.draw STACK"
+          echo "up.type GAUGE"
+          echo "total.cdef up,down,+"
+          echo "total.label total"
+          echo "total.info total usage in bytes by $USER"
+
+        done < $USAGE_DB_LOCATION
+        
+        #root graph traffic
+        echo "multigraph ${LAN_IFACE_MUNIN}_traffic"
+        echo "graph_order up down"
+        echo "graph_title ${LAN_IFACE_MUNIN} traffic"
+        echo "graph_args --base 1000"
+        echo "graph_vlabel bits in (+) / out (-) per \${graph_period}"
+        echo "graph_category network"
+        echo "graph_info This graph shows the traffic for ${LAN_IFACE_MUNIN}"
+        
+        echo "up.type DERIVE"
+        echo "up.min 0" 
+        echo "up.graph no"
+        echo "up.cdef up,8,*"
+        echo "down.info bits sent and received on ${LAN_IFACE_MUNIN}"
+        echo "down.label bps"
+        echo "down.type DERIVE"
+        echo "down.min 0"
+        echo "down.negative up"
+        echo "down.cdef down,8,*"
+        
+        #sub root graph traffic
+        echo "multigraph ${LAN_IFACE_MUNIN}_traffic.traffic"
+        echo "graph_order up down"
+        echo "graph_title ${LAN_IFACE_MUNIN} traffic"
+        echo "graph_args --base 1000"
+        echo "graph_vlabel bits in (+) / out (-) per \${graph_period}"
+        echo "graph_category network"
+        echo "graph_info This graph shows the traffic for ${LAN_IFACE_MUNIN}"
+        
+        echo "up.type DERIVE"
+        echo "up.min 0"
+        echo "up.graph no"
+        echo "up.cdef up,8,*"
+        echo "down.info bits sent and received on ${LAN_IFACE_MUNIN}"
+        echo "down.label bps"
+        echo "down.type DERIVE"
+        echo "down.min 0"
+        echo "down.negative up"
+        echo "down.cdef down,8,*"
+
+        #sub graph traffic
+        #for each mac we monitor
+        [ ! -f $USAGE_DB_LOCATION ] && { touch $USAGE_DB_LOCATION ; }
+        while IFS=, read MAC a b c d e
+        do
+          MAC=`echo $MAC | tr -d ':'` #strip colons from mac
+          echo "multigraph ${LAN_IFACE_MUNIN}_traffic.$MAC"
+          echo "graph_order up down"
+          
+          #graph real name stays constant, but change the labels if we know more
+          USER=$(grep "${MAC}" "${USERSFILE}" | cut -f2 -s -d, )
+                	[ -z "$USER" ] && USER=${MAC}
+          echo "graph_title $USER traffic"
+          echo "graph_vlabel bits in (+) / out (-) per \${graph_period}"
+          echo "graph_args --base 1000"
+          echo "graph_category network"
+          echo "graph_info This graph shows the traffic for $USER"
+          
+          echo "up.type DERIVE"
+          echo "up.min 0"
+          echo "up.graph no"
+          echo "up.cdef up,8,*"
+          echo "down.info bits sent and received by $USER"
+          echo "down.label bps"
+          echo "down.type DERIVE"
+          echo "down.min 0"
+          echo "down.negative up"
+          echo "down.cdef down,8,*"
+        done < $USAGE_DB_LOCATION
+        
+        exit 0;;
+esac
+
+
+################################################################################
+# do the periodic firewall rule check
+################################################################################
+
+	#Create the MUNINLOG CHAIN (it doesn't matter if it already exists).
+	iptables -N MUNINLOG 2> /dev/null
+
+	#Add the MUNINLOG CHAIN to the FORWARD chain (if non existing).
+	iptables -L FORWARD --line-numbers -n | grep "MUNINLOG" | grep "1" > /dev/null
+	if [ $? -ne 0 ]; then
+		iptables -L FORWARD -n | grep "MUNINLOG" > /dev/null
+		if [ $? -eq 0 ]; then
+			iptables -D FORWARD -j MUNINLOG
+		fi
+		  iptables -I FORWARD -j MUNINLOG
+	fi
+
+	#For each host in the ARP table
+	grep ${LAN_IFACE} /proc/net/arp | while read IP TYPE FLAGS MAC MASK IFACE ;
+	do
+		#Add iptable rules (if non existing).
+		
+		iptables -nL MUNINLOG | grep "${IP} " > /dev/null
+		if [ $? -ne 0 ]; then
+			iptables -I MUNINLOG -d ${IP} -j RETURN
+			iptables -I MUNINLOG -s ${IP} -j RETURN
+		fi
+	done	
+
+
+################################################################################
+# Do the actual dumping of counters
+################################################################################
+
+	lock # lock the usage database
+	
+	#Read and reset counters
+	iptables -L MUNINLOG -vnxZ -t filter > /tmp/traffic_$$.tmp
+	
+	echo 0 > /tmp/tot_in_$$.tmp
+	echo 0 > /tmp/tot_out_$$.tmp
+	
+	grep -v "0x0" /proc/net/arp | grep -v 'IP address' | while read IP TYPE FLAGS MAC MASK IFACE
+	do
+		#Add new data to the graph. Count in Kbs to deal with 16 bits signed values (up to 2G only)
+		#Have to use temporary files because of crappy busybox shell
+		grep ${IP} /tmp/traffic_$$.tmp | while read PKTS BYTES TARGET PROT OPT IFIN IFOUT SRC DST
+		do
+			[ "${DST}" = "${IP}" ] && echo ${BYTES:-0} > /tmp/in_$$.tmp
+			[ "${SRC}" = "${IP}" ] && echo ${BYTES:-0} > /tmp/out_$$.tmp
+		done
+		IN=$(cat /tmp/in_$$.tmp 2> /dev/null || echo "0")
+		OUT=$(cat /tmp/out_$$.tmp 2> /dev/null || echo "0")
+		rm -f /tmp/in_$$.tmp
+		rm -f /tmp/out_$$.tmp
+
+		if [ ${IN:-0} -gt 0 -o ${OUT:-0} -gt 0 ];  then
+		
+			LINE=$(grep ${MAC} ${USAGE_DB_LOCATION})
+			if [ -z "${LINE}" ]; then
+				USAGE_IN=0
+				USAGE_OUT=0
+			else
+				USAGE_IN=$(echo ${LINE} | cut -f2 -s -d, )
+				USAGE_OUT=$(echo ${LINE} | cut -f3 -s -d, )
+			fi
+			
+			USAGE_IN=$((${USAGE_IN}+${IN}))
+			USAGE_OUT=$((${USAGE_OUT}+${OUT}))
+			
+			TOT_IN=$(cat /tmp/tot_in_$$.tmp || echo "0")
+			TOT_OUT=$(cat /tmp/tot_out_$$.tmp || echo "0")
+			TOT_IN=$((${IN}+${TOT_IN}))                                                
+			TOT_OUT=$((${OUT}+${TOT_OUT})) 
+			echo ${TOT_IN} > /tmp/tot_in_$$.tmp
+			echo ${TOT_OUT} > /tmp/tot_out_$$.tmp
+			
+			grep -v "${MAC}" ${USAGE_DB_LOCATION} > /tmp/db_$$.tmp
+			mv /tmp/db_$$.tmp ${USAGE_DB_LOCATION}
+			echo ${MAC},${USAGE_IN},${USAGE_OUT},${IN},${OUT},$(date "+%d-%m-%Y %H:%M") >> ${USAGE_DB_LOCATION}
+
+      MAC=`echo $MAC | tr -d ':'`
+		fi
+	done
+	TOT_IN=$(cat /tmp/tot_in_$$.tmp || echo "0")
+	TOT_OUT=$(cat /tmp/tot_out_$$.tmp || echo "0")
+		
+	cat ${USAGE_DB_LOCATION} | while IFS=, read MAC USAGE_IN USAGE_OUT IN OUT LASTSEEN	
+	do
+		TOT_USAGE_IN=$(cat /tmp/tot_usage_in_$$.tmp 2> /dev/null || echo "0")
+		TOT_USAGE_OUT=$(cat /tmp/tot_usage_out_$$.tmp 2> /dev/null || echo "0")
+		TOT_USAGE_IN=$((${USAGE_IN:-0}+${TOT_USAGE_IN:-0}))
+		TOT_USAGE_OUT=$((${USAGE_OUT:-0}+${TOT_USAGE_OUT:-0}))
+		echo ${TOT_USAGE_IN} > /tmp/tot_usage_in_$$.tmp 
+		echo ${TOT_USAGE_OUT} > /tmp/tot_usage_out_$$.tmp		
+		MAC=`echo $MAC | tr -d ':'`
+		echo "multigraph ${LAN_IFACE_MUNIN}_usage.$MAC"
+		echo "down.value ${USAGE_IN:-0}"
+		echo "up.value ${USAGE_OUT:-0}"
+		echo "multigraph ${LAN_IFACE_MUNIN}_traffic.$MAC"
+		echo "down.value ${USAGE_IN:-0}"
+		echo "up.value ${USAGE_OUT:-0}"
+	done
+	TOT_USAGE_IN=$(cat /tmp/tot_usage_in_$$.tmp || echo "0")
+	TOT_USAGE_OUT=$(cat /tmp/tot_usage_out_$$.tmp || echo "0")
+	echo "multigraph ${LAN_IFACE_MUNIN}_usage"
+	echo "down.value ${TOT_USAGE_IN:-0}"
+	echo "up.value ${TOT_USAGE_OUT:-0}"
+	echo "multigraph ${LAN_IFACE_MUNIN}_traffic"
+	echo "down.value ${TOT_USAGE_IN:-0}"
+	echo "up.value ${TOT_USAGE_OUT:-0}"
+
+	echo "multigraph ${LAN_IFACE_MUNIN}_usage.usage"
+	echo "down.value ${TOT_USAGE_IN:-0}"
+	echo "up.value ${TOT_USAGE_OUT:-0}"
+	echo "multigraph ${LAN_IFACE_MUNIN}_traffic.traffic"
+	echo "down.value ${TOT_USAGE_IN:-0}"
+	echo "up.value ${TOT_USAGE_OUT:-0}"
+
+	#Free some memory
+	rm -f /tmp/*_$$.tmp
+	unlock
